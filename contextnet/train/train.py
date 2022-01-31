@@ -1,5 +1,5 @@
 import torch
-from ..utils.losses import GaussianFocalLoss
+from  contextnet.utils.losses import GaussianFocalLoss
 from tqdm import tqdm
 #from torch.utils.data import DataLoader
 from torchvision.utils import save_image
