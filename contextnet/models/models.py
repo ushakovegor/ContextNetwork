@@ -5,6 +5,17 @@ from mmcv.cnn import ConvModule
 from contextnet.utils.losses import GaussianFocalLoss, MSELoss
 from contextnet.utils.utils import WBF
 import torch.nn.functional as F
+from endoanalysis.targets import KeypointsBatch, Keypoints, keypoints_list_to_batch
+import segmentation_models_pytorch as smp
+import torchvision.models.segmentation as seg_models
+
+
+class Identity(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
 
 class Block(nn.Module):
     def __init__(self, num_layers, in_channels, out_channels, identity_downsample=None, stride=1):
@@ -163,14 +174,14 @@ class ContextNetHead(nn.Module):
                  in_channel,
                  feat_channel,
                  num_classes,
-                 loss_heatmap=GaussianFocalLoss,
+                 loss_heatmap=GaussianFocalLoss(),
                  loss_weight=1.0):
         super(ContextNetHead, self).__init__()
         self.num_classes = num_classes
         self.heatmap_head = self._build_head(in_channel, feat_channel,
                                              num_classes)
 
-        self.loss_heatmap = loss_heatmap()
+        self.loss_heatmap = loss_heatmap
 
     def _build_head(self, in_channel, feat_channel, out_channel):
         """Build head for each branch."""
@@ -197,9 +208,14 @@ class ContextNetHead(nn.Module):
 class ContextNet(nn.Module):
     def __init__(self, img_channels=3, num_classes=2, img_shape=None, kp_shape=None):
         super(ContextNet, self).__init__()
-        self.backbone = ResNet(18, Block, img_channels)
-        self.neck = CTResNetNeck(512, num_deconv_filters=(256, 128, 64), num_deconv_kernels=(4, 4, 4))
-        self.head = ContextNetHead(64, 64, num_classes=num_classes)
+        self.backbone = seg_models.fcn_resnet50(pretrained=True)
+        self.backbone.classifier = ContextNetHead(2048, 1024, num_classes=num_classes)
+        self.backbone.aux_classifier = nn.Identity()
+        # self.backbone.avgpool = Identity()
+        # self.backbone.fc = Identity()
+        # self.neck = CTResNetNeck(2048, num_deconv_filters=(512, 256, 128, 64), num_deconv_kernels=(3, 3, 3, 3))
+        # self.head = ContextNetHead(64, 64, num_classes=num_classes)
+        # print(self.backbone)
         if img_shape is not None:
             self.img_shape = img_shape
         else:
@@ -213,12 +229,12 @@ class ContextNet(nn.Module):
 
     def forward(self, x):
         x = self.backbone(x)
-        x = self.neck(x)
-        x = self.head(x)
-        return x
+        # x = self.neck(x['out'])
+        # x = self.head(x)
+        return x['out']
     
     def get_loss(self, pd_heatmaps, gt_heatmaps):
-        loss = self.head.get_loss(pd_heatmaps, gt_heatmaps)
+        loss = self.backbone.classifier.get_loss(pd_heatmaps, gt_heatmaps)
         return self.compute_loss(loss)
 
     def compute_loss(self, loss):
@@ -227,19 +243,16 @@ class ContextNet(nn.Module):
     def get_keypoints(self, pd_heatmaps, rescales=None, with_wbf=False):
         # scale_factors = [img_meta['scale_factor'] for img_meta in img_metas]
 
-        batch_det_keypoints= self._decode_heatmap(pd_heatmaps)
-
-        if rescales is not None:
-            batch_det_keypoints[..., :4] /= batch_det_keypoints.new_tensor(   # PLS FIX IT
-                rescales).unsqueeze(1)
-
+        batch_bboxes, batch_scores = self._decode_heatmap(pd_heatmaps)
+        batch_bboxes = keypoints_list_to_batch(batch_bboxes)
+        batch_scores = batch_scores.reshape(-1)
         if with_wbf:
             det_results = []
-            for det_keypoints in batch_det_keypoints: # PLS FIX IT. NEED TO UPDATE KEYPOINTS STACKING FOR BATCH
+            for det_keypoints in zip(batch_bboxes, batch_scores): # PLS FIX IT. NEED TO UPDATE KEYPOINTS STACKING FOR BATCH
                 det_bbox = WBF(det_keypoints)
                 det_results.append(det_bbox)
         else:
-            det_results = batch_det_keypoints
+            det_results = batch_bboxes, batch_scores
         return det_results
 
     def _decode_heatmap(self, center_heatmap_pred, kernel=3, k=400):
@@ -257,16 +270,18 @@ class ContextNet(nn.Module):
             center_heatmap_pred, k=k)
         batch_scores, batch_topk_labels = batch_dets
 
-        x = topk_xs * (inp_w / width)
-        y = topk_ys * (inp_h / height)
+        x = topk_xs * (out_w / width)
+        y = topk_ys * (out_h / height)
 
         batch_bboxes = torch.stack([x, y], dim=2)
-        batch_bboxes = torch.cat((batch_bboxes, batch_scores[..., None]),
+        batch_bboxes = torch.cat((batch_bboxes, batch_topk_labels[..., None]),
                                  dim=-1)
-        return batch_bboxes, batch_topk_labels
+        batch_bboxes = batch_bboxes.numpy()
+        batch_scores = batch_scores.numpy()
+        return batch_bboxes, batch_scores
     
 
-    def _get_local_maximum(heat, kernel=3):
+    def _get_local_maximum(self, heat, kernel=3):
         """Extract local maximum pixel with given kernal.
         Args:
             heat (Tensor): Target heatmap.
@@ -281,7 +296,7 @@ class ContextNet(nn.Module):
         return heat * keep
 
 
-    def _get_topk_from_heatmap(scores, k=500):
+    def _get_topk_from_heatmap(self, scores, k=500):
         """Get top k positions from heatmap.
         Args:
             scores (Tensor): Target heatmap with shape
@@ -304,18 +319,109 @@ class ContextNet(nn.Module):
         topk_xs = (topk_inds % width).int().float()
         return topk_scores, topk_clses, topk_ys, topk_xs
 
-    def _keypoints_wbf(self):
-        if labels.numel() == 0:
-            return bboxes, labels
 
-        out_bboxes, keep = batched_nms(bboxes[:, :4], bboxes[:, -1], labels,
-                                       cfg.nms_cfg)
-        out_labels = labels[keep]
+class ContextNetTry2(nn.Module):
+    def __init__(self, img_channels=3, num_classes=2, img_shape=None, kp_shape=None):
+        super(ContextNetTry2, self).__init__()
+        self.backbone = smp.Unet(in_channels=img_channels,
+                                classes=num_classes)
+        # print(self.backbone)
+        # self.backbone.segmentation_head = ContextNetHead(16, 16, num_classes=num_classes)
+        if img_shape is not None:
+            self.img_shape = img_shape
+        else:
+            self.img_shape = (512, 512)
+        
+        if kp_shape is not None:
+            self.kp_shape = kp_shape
+        else:
+            self.kp_shape = (512, 512)
+        
 
-        if len(out_bboxes) > 0:
-            idx = torch.argsort(out_bboxes[:, -1], descending=True)
-            idx = idx[:cfg.max_per_img]
-            out_bboxes = out_bboxes[idx]
-            out_labels = out_labels[idx]
+    def forward(self, x):
+        x = self.backbone(x)
+        # x = self.head(x)
+        return x
 
-        return out_bboxes, out_labels
+
+# class Unet(SegmentationModel):
+#     """Unet_ is a fully convolution neural network for image semantic segmentation. Consist of *encoder*
+#     and *decoder* parts connected with *skip connections*. Encoder extract features of different spatial
+#     resolution (skip connections) which are used by decoder to define accurate segmentation mask. Use *concatenation*
+#     for fusing decoder blocks with skip connections.
+
+#     Args:
+#         encoder_name: Name of the classification model that will be used as an encoder (a.k.a backbone)
+#             to extract features of different spatial resolution
+#         encoder_depth: A number of stages used in encoder in range [3, 5]. Each stage generate features
+#             two times smaller in spatial dimensions than previous one (e.g. for depth 0 we will have features
+#             with shapes [(N, C, H, W),], for depth 1 - [(N, C, H, W), (N, C, H // 2, W // 2)] and so on).
+#             Default is 5
+#         encoder_weights: One of **None** (random initialization), **"imagenet"** (pre-training on ImageNet) and
+#             other pretrained weights (see table with available weights for each encoder_name)
+#         decoder_channels: List of integers which specify **in_channels** parameter for convolutions used in decoder.
+#             Length of the list should be the same as **encoder_depth**
+#         decoder_use_batchnorm: If **True**, BatchNorm2d layer between Conv2D and Activation layers
+#             is used. If **"inplace"** InplaceABN will be used, allows to decrease memory consumption.
+#             Available options are **True, False, "inplace"**
+#         decoder_attention_type: Attention module used in decoder of the model. Available options are
+#             **None** and **scse** (https://arxiv.org/abs/1808.08127).
+#         in_channels: A number of input channels for the model, default is 3 (RGB images)
+#         classes: A number of classes for output mask (or you can think as a number of channels of output mask)
+#         activation: An activation function to apply after the final convolution layer.
+#             Available options are **"sigmoid"**, **"softmax"**, **"logsoftmax"**, **"tanh"**, **"identity"**,
+#                 **callable** and **None**.
+#             Default is **None**
+#         aux_params: Dictionary with parameters of the auxiliary output (classification head). Auxiliary output is build
+#             on top of encoder if **aux_params** is not **None** (default). Supported params:
+#                 - classes (int): A number of classes
+#                 - pooling (str): One of "max", "avg". Default is "avg"
+#                 - dropout (float): Dropout factor in [0, 1)
+#                 - activation (str): An activation function to apply "sigmoid"/"softmax"
+#                     (could be **None** to return logits)
+
+#     Returns:
+#         ``torch.nn.Module``: Unet
+
+#     .. _Unet:
+#         https://arxiv.org/abs/1505.04597
+
+#     """
+
+#     def __init__(
+#         self,
+#         encoder_name = "resnet34",
+#         encoder_depth = 5,
+#         encoder_weights = "imagenet",
+#         decoder_use_batchnorm = True,
+#         decoder_channels = (256, 128, 64, 32, 16),
+#         decoder_attention_type = None,
+#         in_channels = 3,
+#         classes = 1,
+#         activation = None,
+#         aux_params = None,
+#     ):
+#         super().__init__()
+
+#         self.encoder = get_encoder(
+#             encoder_name,
+#             in_channels=in_channels,
+#             depth=encoder_depth,
+#             weights=encoder_weights,
+#         )
+
+#         self.decoder = UnetDecoder(
+#             encoder_channels=self.encoder.out_channels,
+#             decoder_channels=decoder_channels,
+#             n_blocks=encoder_depth,
+#             use_batchnorm=decoder_use_batchnorm,
+#             center=True if encoder_name.startswith("vgg") else False,
+#             attention_type=decoder_attention_type,
+#         )
+
+#         self.segmentation_head = SegmentationHead(
+#             in_channels=decoder_channels[-1],
+#             out_channels=classes,
+#             activation=activation,
+#             kernel_size=3,
+#         )

@@ -5,13 +5,39 @@ import os
 import yaml
 
 
-class Minkovsky2DSimilarity:
+import numpy as np
+
+
+class SimilarityMeasure:
+    """
+    Base class for similarity measures
+    """
+
+    def measure(self, object1, object2):
+        """
+        Returns the measure value between two objects
+        """
+        return 0
+
+    def matrix(self, container1, container2):
+        """
+        Returns the matrix of measure values between two sets of objects
+        Sometimes can be implemented in a faster way than making couplewise measurements
+        """
+        matrix = np.zeros((len(container1), len(container2)))
+        for i, object1 in enumerate(container1):
+            for j, object2 in enumerate(container2):
+                matrix[i, j] = self.measure(object1, object2)
+        return matrix
+
+
+class Minkovsky2DSimilarity(SimilarityMeasure):
     def __init__(self, p=2, scale=1.0):
         self.p = p
         self.scale = scale
         
 
-    def measure(self, point1, point2):# FIX ME
+    def measure(self, point1, point2):
         x_diff = point1.x_coords()[0] - point2.x_coords()[0]
         y_diff = point1.y_coords()[0] - point2.y_coords()[0]
         diffs = np.hstack([np.abs(x_diff), np.abs(y_diff)])
@@ -31,6 +57,32 @@ class Minkovsky2DSimilarity:
         matrix = np.power(powers.sum(axis=0), 1 / self.p) / self.scale
 
         return matrix
+
+
+class KPSimilarity(Minkovsky2DSimilarity):
+    """
+    Keypoints similarity
+    """
+
+    def __init__(self, p=2, scale=1.0, class_agnostic=True):
+        super().__init__(p, scale)
+        self.class_agnostic = class_agnostic
+
+    def _exp_square(self, arr):
+        return np.exp(-np.power(arr, 2) / 2.0)
+
+    def measure(self, point1, point2):
+        distance = super().measure(point1, point2)
+        return self._exp_square(distance)
+
+    def matrix(self, points1, points2):
+        distance = super().matrix(points1, points2)
+        matrix = self._exp_square(distance)
+        if not self.class_agnostic:
+            class_matrix = points1.classes().reshape(-1, 1) == points2.classes().reshape(1,-1)
+            matrix = matrix * class_matrix
+        return matrix
+
     
 
 def prefilter_boxes(keypoints, skip_threshold=0.0):
@@ -180,10 +232,9 @@ def WBF(keypoints, similarity, threshold, skip_threshold=0.0, conf_type='avg'):
     return match_keypoints
 
 
-def extract_images_and_labels_paths(images_list_file, heatmaps_list_file, labels_list_file):
+def extract_images_and_labels_paths(images_list_file, labels_list_file):
 
     images_list_dir = os.path.dirname(images_list_file)
-    heatmaps_list_dir = os.path.dirname(heatmaps_list_file)
     labels_list_dir = os.path.dirname(labels_list_file)
 
     with open(images_list_file, "r") as images_file:
@@ -191,66 +242,56 @@ def extract_images_and_labels_paths(images_list_file, heatmaps_list_file, labels
         images = [
             os.path.normpath(os.path.join(images_list_dir, x.strip())) for x in images
         ]
-    with open(heatmaps_list_file, "r") as heatmaps_file:
-        heatmaps = heatmaps_file.readlines()
-        heatmaps = [
-            os.path.normpath(os.path.join(heatmaps_list_dir, x.strip())) for x in heatmaps
-        ]
     with open(labels_list_file, "r") as labels_file:
         labels = labels_file.readlines()
         labels = [
             os.path.normpath(os.path.join(labels_list_dir, x.strip())) for x in labels
         ]
 
-    check_images_and_labels_pathes(images, heatmaps, labels)
+    check_images_and_labels_pathes(images, labels)
 
-    return images, heatmaps, labels
+    return images, labels
 
 
-def agregate_images_and_labels_paths(images_lists, heatmaps_list, labels_lists):
+def agregate_images_and_labels_paths(images_lists, labels_lists):
 
-    if type(images_lists) != type(labels_lists) and type(images_lists) != type(heatmaps_list):
+    if type(images_lists) != type(labels_lists):
         raise Exception(
-            "images_list_files and heatmaps_list_files andlabels_list_file should have the same type"
+            "images_list_files and labels_list_file should have the same type"
         )
 
     if type(images_lists) != list:
         images_lists = [images_lists]
-        heatmaps_list = [heatmaps_list]
         labels_lists = [labels_lists]
 
     images_paths = []
-    heatmaps_paths = []
     labels_paths = []
-    for images_list_path, heatmaps_list_path, labels_list_path in zip(images_lists, heatmaps_list, labels_lists):
-        images_paths_current, heatmaps_paths_current, labels_paths_current = extract_images_and_labels_paths(
-            images_list_path, heatmaps_list_path, labels_list_path
+    for images_list_path, labels_list_path in zip(images_lists, labels_lists):
+        images_paths_current, labels_paths_current = extract_images_and_labels_paths(
+            images_list_path, labels_list_path
         )
         images_paths += images_paths_current
-        heatmaps_paths += heatmaps_paths_current
         labels_paths += labels_paths_current
 
-    return images_paths, heatmaps_paths, labels_paths
+    return images_paths, labels_paths
 
 
-def check_images_and_labels_pathes(images_paths, heatmaps_paths, labels_paths):
+def check_images_and_labels_pathes(images_paths, labels_paths):
 
-    if len(images_paths) != len(labels_paths) and len(images_paths) != len(heatmaps_paths):
-        raise Exception("Numbers of images and heatmaps and labels are not equal")
+    if len(images_paths) != len(labels_paths):
+        raise Exception("Numbers of images and labels are not equal")
 
-    for image_path, heatmap_path, labels_path in zip(images_paths, heatmaps_paths, labels_paths):
+    for image_path, labels_path in zip(images_paths, labels_paths):
         dirname_image = os.path.dirname(image_path)
-        dirname_heatmap = os.path.dirname(heatmap_path)
         dirname_labels = os.path.dirname(labels_path)
         filename_image = os.path.basename(image_path)
-        filename_heatmap = os.path.basename(heatmap_path)
         filename_labels = os.path.basename(labels_path)
 
         if ".".join(filename_image.split(".")[:-1]) != ".".join(
-            filename_heatmap.split(".")[:-1]) and ".".join(filename_image.split(".")[:-1]) != ".".join(
-            filename_labels.split(".")[:-1]):
+            filename_labels.split(".")[:-1]
+        ):
             raise Exception(
-                "Different dirnames found: \n %s\n %s \n %s" % (images_paths, filename_heatmap, labels_paths)
+                "Different dirnames found: \n %s\n  %s" % (images_paths, labels_paths)
             )
 
 
@@ -321,9 +362,12 @@ def parse_master_yaml(yaml_path):
 
     return lists
 
+def _sigmoid(x):
+  y = torch.clamp(x.sigmoid_(), min=1e-4, max=1-1e-4)
+  return y
 
 # def maker():
-    # images_pathes = []
+    #     images_pathes = []
     #     heatmaps_pathes = []
     #     a = set()
     #     n=0
@@ -347,3 +391,29 @@ def parse_master_yaml(yaml_path):
     #             images_file.write(f'{path}\n')
     #             n += 1
     #     print()
+
+
+
+
+#     images_pathes = []
+#     labels_pathes = []
+#     a = set()
+#     labels = []
+#     for (dirpath, dirnames, filenames) in walk('../../dataset_bulk/labels'):
+#         labels.extend(filenames)
+#         break
+
+    
+#     for name in labels:
+#         name_norm = os.path.splitext(name)[0]
+#         images_pathes.append(os.path.join('./images', f'{name_norm}.png'))
+#         labels_pathes.append(os.path.join('./labels', f'{name_norm}.txt'))
+
+#     with open('../../dataset_bulk/images.txt', 'w') as images_file:
+#         for path in images_pathes:
+#             images_file.write(f'{path}\n')
+    
+#     with open('../../dataset_bulk/labels.txt', 'w') as images_file:
+#         for path in labels_pathes:
+#             images_file.write(f'{path}\n')
+#     print()

@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from contextnet.utils.utils import _sigmoid
+from nucleidet.train.criterions import HeatmapHuber
+
 
 class GaussianFocalLoss(nn.Module):
     """
@@ -23,7 +26,7 @@ class GaussianFocalLoss(nn.Module):
         self.loss_weight = loss_weight
 
     def forward(self, pred, gt):
-        eps = 1e-12
+        eps = 1e-10
         pos_weights = gt.eq(1)
         neg_weights = (1 - gt).pow(self.gamma)
         pos_loss = -(pred + eps).log() * (1 - pred).pow(self.alpha) * pos_weights
@@ -76,4 +79,33 @@ class MSELoss(nn.Module):
             torch.Tensor: The calculated loss
         """
         loss = F.mse_loss(pred, target, reduction=self.reduction)
+        return loss
+
+
+class MixedLoss(nn.Module):
+    """
+    Focal loss for heatmaps.
+
+    Parameters
+    ----------
+    alpha: float
+        A balanced form for Focal loss.
+    gamma: float
+        The gamma for calculating the modulating factor.
+    loss_weight:
+        The weight for the Focal loss.
+    """
+
+    def __init__(self, class_weights, focal_weight=1.0, huber_weight=1.0):
+        super(MixedLoss, self).__init__()
+        self.focal_weight = focal_weight
+        self.huber_weight = huber_weight
+        self.focal_func = GaussianFocalLoss()
+        self.huber_func = HeatmapHuber(class_weights=class_weights)
+
+    def forward(self, pred, gt):
+        pred_sigm = _sigmoid(pred)
+        focal_loss = self.focal_func(pred_sigm, gt) * self.focal_weight
+        huber_loss = self.huber_func(gt, pred) * self.huber_weight
+        loss = focal_loss + huber_loss
         return loss

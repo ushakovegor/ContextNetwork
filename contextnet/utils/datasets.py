@@ -12,13 +12,15 @@ from endoanalysis.visualization import visualize_keypoints
 from nucleidet.data.heatmaps import make_heatmap
 from nucleidet.data.keypoints import rescale_keypoints
 from contextnet.utils.utils import agregate_images_and_labels_paths, load_image, load_keypoints
+from endoanalysis.targets import KeypointsBatch
+from torchvision.utils import save_image
 
 
 class PrecomputedDataset(Dataset):
     """
     Dataset which loads the precomputed images, keypoints and heatmaps.
     """
-    def __init__(self, data_file, epochs=3):
+    def __init__(self, data_file, epochs=1):
         self.data = []
         with open(data_file, 'r') as file:
             for data in file:
@@ -45,9 +47,9 @@ class PrecomputedDataset(Dataset):
         heatmaps_name = os.path.join(self.root_dir, str(epoch), self.heatmaps_dir,
                                 f'{self.data[idx]}.pt')
         
-        image = torch.load(image_name,  map_location=torch.device('cuda'))
+        image = torch.load(image_name)
         keypoints = np.load(keypoints_name)
-        heatmaps = torch.load(heatmaps_name, map_location=torch.device('cuda'))
+        heatmaps = torch.load(heatmaps_name)
         sample = {'image': image, 'keypoints': keypoints, 'heatmap': heatmaps}
 
         return sample
@@ -60,25 +62,26 @@ class PrecomputedDataset(Dataset):
             images.append(sample['image'])
             keypoints.append(sample['keypoints'])
             heatmaps.append(sample['heatmap'])
-        res = {'image': torch.stack(images), 'keypoints': np.concatenate(keypoints), 'heatmap': torch.stack(heatmaps)}
+        res = {'image': torch.stack(images), 'keypoints': KeypointsBatch(keypoints_list_to_batch(keypoints)), 'heatmap': torch.stack(heatmaps)}
         return res
 
-class ContextPointsDataset:
+
+class PointsDataset:
     def __init__(
         self,
         images_list,
-        heatmaps_list,
         labels_list,
-        keypoints_dtype=np.float
+        keypoints_dtype=np.float,
+        class_colors={x: cm.Set1(x) for x in range(10)},
     ):
 
         self.keypoints_dtype = keypoints_dtype
 
-        self.images_paths, self.heatmaps_paths,self.labels_paths = agregate_images_and_labels_paths(
+        self.images_paths, self.labels_paths = agregate_images_and_labels_paths(
             images_list,
-            heatmaps_list,
-            labels_list,
+            labels_list
         )
+        self.class_colors = class_colors
 
     def __len__(self):
         return len(self.images_paths)
@@ -86,7 +89,6 @@ class ContextPointsDataset:
     def __getitem__(self, x):
 
         image = load_image(self.images_paths[x])
-        heatmaps = load_image(self.heatmaps_paths[x])
         keypoints = load_keypoints(self.labels_paths[x])
 
         class_labels = [x[-1] for x in keypoints]
@@ -104,11 +106,33 @@ class ContextPointsDataset:
         to_return = {"keypoints": Keypoints(keypoints.astype(self.keypoints_dtype))}
 
         to_return["image"] = image
-        to_return["heatmap"] = heatmaps
 
         return to_return
 
-    def collate_fn(self, samples): # FIX ME. ADD HEATMAPS
+    def visualize(
+        self,
+        x,
+        show_labels=True,
+        labels_kwargs={"radius": 3, "alpha": 1.0, "ec": (0, 0, 0)},
+    ):
+
+        sample = self[x]
+
+        image = sample["image"]
+
+        if show_labels:
+            keypoints = sample["keypoints"]
+        else:
+            keypoints = Keypoints(np.empty((0, 3)))
+
+        _ = visualize_keypoints(
+            image,
+            keypoints,
+            class_colors=self.class_colors,
+            circles_kwargs=labels_kwargs,
+        )
+
+    def collate(self, samples):
 
         images = [x["image"] for x in samples]
         keypoints_groups = [x["keypoints"] for x in samples]
@@ -121,13 +145,12 @@ class ContextPointsDataset:
         return return_dict
 
 
-class HeatmapsDataset(ContextPointsDataset, Dataset):
+class HeatmapsDataset(PointsDataset, Dataset):
     "Dataset with images, keypoints and the heatmaps corresdonding to them."
 
     def __init__(
         self,
         images_list,
-        heatmaps_list,
         labels_list,
         normalization=None,
         resize_to=None,
@@ -136,37 +159,43 @@ class HeatmapsDataset(ContextPointsDataset, Dataset):
         sigma=1,
         num_classes=1,
         augs_list=[],
+        scale=1,
         heatmaps_shape=None,
+        shift=(0, 0)
     ):
 
         super(HeatmapsDataset, self).__init__(
-            images_list=images_list, heatmaps_list=heatmaps_list,
-            labels_list=labels_list, keypoints_dtype=keypoints_dtype
+            images_list=images_list, labels_list=labels_list,
+            class_colors=class_colors, keypoints_dtype=keypoints_dtype
         )
 
         self.sigma = sigma
         self.num_classes = num_classes
         self.heatmaps_shape = heatmaps_shape
         self.normalization = normalization
-
+        self.scale = scale
         if resize_to:
             augs_list.append(A.augmentations.Resize(*resize_to))
-        
+
         self.alb_transforms = A.Compose(
             augs_list,
-            keypoint_params=A.KeypointParams(format="xy", label_fields=["class_labels"]),
+            keypoint_params=A.KeypointParams(
+                format="xy", label_fields=["class_labels"]
+            )
         )
+        self.shift = shift
 
     def __getitem__(self, x):
 
         sample = super(HeatmapsDataset, self).__getitem__(x)
-        y_size, x_size, _ = sample["heatmap"].shape
-        y_size /= 3
-        x_size /= 3
+        y_size, x_size, _ = sample["image"].shape
+        # if self.image_without_context_shape is not None:
+        #     y_size, x_size = self.image_without_context_shape
         if self.alb_transforms is not None:
 
             keypoints_no_class = np.stack(
-                [sample["keypoints"].x_coords(), sample["keypoints"].y_coords()]
+                [sample["keypoints"].x_coords(),
+                 sample["keypoints"].y_coords()]
             ).T
             classes = list(sample["keypoints"].classes())
 
@@ -177,12 +206,15 @@ class HeatmapsDataset(ContextPointsDataset, Dataset):
             )
 
             kp_coords = np.array(transformed["keypoints"])
+            
             classes = np.array(transformed["class_labels"]).reshape(-1, 1)
 
             sample["keypoints"] = Keypoints(
                 np.hstack([kp_coords, classes]).astype(float)
             )
             sample["image"] = transformed["image"]
+            y_size = int(sample["image"].shape[0] / self.scale)
+            x_size = int(sample["image"].shape[1] / self.scale)
 
         if self.heatmaps_shape:
             keypoints_to_heatmap = rescale_keypoints(
@@ -192,13 +224,15 @@ class HeatmapsDataset(ContextPointsDataset, Dataset):
         else:
             keypoints_to_heatmap = sample["keypoints"]
 
-        sample["heatmap"] = make_heatmap(
+        sample["heatmaps"] = make_heatmap(
             x_size, y_size, keypoints_to_heatmap, self.sigma, self.num_classes
         )
 
         sample["image"] = np.moveaxis(sample["image"], -1, 0)
 
-        for key in ["heatmap", "image"]:
+        
+
+        for key in ["heatmaps", "image"]:
             sample[key] = torch.tensor(sample[key]).float()
 
         if self.normalization:
@@ -207,13 +241,17 @@ class HeatmapsDataset(ContextPointsDataset, Dataset):
             )
             sample["image"] /= torch.tensor(self.normalization["std"]).reshape(-1, 1, 1)
 
+        # gt_image = (torch.cat((sample["heatmaps"], torch.zeros(1, 512, 512)), 0))
+        # save_image(sample["image"] / 255, f'./images_test/image_0.png')
+        # save_image(gt_image, f'./heatmaps_gt/gt_0.png')
+
         return sample
 
     def collate(self, samples):
 
         images = [x["image"] for x in samples]
         keypoints_groups = [x["keypoints"] for x in samples]
-        heatmaps = [x["heatmap"] for x in samples]
+        heatmaps = [x["heatmaps"] for x in samples]
 
         return_dict = {
             "image": torch.stack(images, 0).contiguous(),
@@ -232,7 +270,9 @@ class HeatmapsDataset(ContextPointsDataset, Dataset):
 
         sample = self[x]
         if self.normalization:
-            sample["image"] = sample["image"] * torch.tensor(self.normalization["std"]).view(-1,1,1) + torch.tensor(self.normalization["mean"]).view(-1,1,1) 
+            sample["image"] = sample["image"] * torch.tensor(
+                self.normalization["std"]
+            ).view(-1, 1, 1) + torch.tensor(self.normalization["mean"]).view(-1, 1, 1)
         sample["image"] = sample["image"].int().numpy()
         sample["image"] = np.moveaxis(sample["image"], 0, -1)
 
@@ -268,7 +308,7 @@ class PrecomputionLight:
         the flag of overwriting files.
     """
 
-    def __init__(self, dataset, output_dir, k=3, overwrite=False):
+    def __init__(self, dataset, output_dir, k=1, overwrite=False):
         self.dataset = dataset
         self.output_dir = output_dir
         self.k = k
