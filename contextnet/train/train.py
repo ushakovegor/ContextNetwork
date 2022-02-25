@@ -30,7 +30,7 @@ class ModelTrainer:
                  scheduler=None,
                  similarity=None,
                  epochs=100,
-                 batch_size=13,
+                 batch_size=2,
                  device=None,
                  val_step=-1,
                  save_step=5,
@@ -62,7 +62,7 @@ class ModelTrainer:
             self.optimizer = optimizer
         else:
             params = [p for p in self.model.parameters() if p.requires_grad]
-            self.optimizer = torch.optim.SGD(params, lr=0.001)#, weight_decay=0.0001)
+            self.optimizer = torch.optim.SGD(params, lr=0.01)#, weight_decay=0.0001)
         # Loss
         if loss is not None:
             self.loss_func = loss

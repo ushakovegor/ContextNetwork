@@ -174,6 +174,7 @@ class HeatmapsDataset(PointsDataset, Dataset):
         self.heatmaps_shape = heatmaps_shape
         self.normalization = normalization
         self.scale = scale
+        self.resize_to = resize_to
         if resize_to:
             augs_list.append(A.augmentations.Resize(*resize_to))
 
@@ -188,14 +189,14 @@ class HeatmapsDataset(PointsDataset, Dataset):
     def __getitem__(self, x):
 
         sample = super(HeatmapsDataset, self).__getitem__(x)
-        y_size, x_size, _ = sample["image"].shape
-        # if self.image_without_context_shape is not None:
-        #     y_size, x_size = self.image_without_context_shape
+        y_size = sample["image"].shape[0] / self.scale
+        x_size = sample["image"].shape[1] / self.scale
+        
         if self.alb_transforms is not None:
 
             keypoints_no_class = np.stack(
-                [sample["keypoints"].x_coords(),
-                 sample["keypoints"].y_coords()]
+                [sample["keypoints"].x_coords() + x_size,
+                 sample["keypoints"].y_coords() + y_size]
             ).T
             classes = list(sample["keypoints"].classes())
 
@@ -204,21 +205,24 @@ class HeatmapsDataset(PointsDataset, Dataset):
                 keypoints=keypoints_no_class,
                 class_labels=classes,
             )
-
+            sample["image"] = transformed["image"]
+            y_size = sample["image"].shape[0] / self.scale
+            x_size = sample["image"].shape[1] / self.scale
             kp_coords = np.array(transformed["keypoints"])
-            
+
+            kp_coords[:, 0] = kp_coords[:, 0] - y_size
+            kp_coords[:, 1] = kp_coords[:, 1] - x_size
+
             classes = np.array(transformed["class_labels"]).reshape(-1, 1)
 
             sample["keypoints"] = Keypoints(
                 np.hstack([kp_coords, classes]).astype(float)
             )
-            sample["image"] = transformed["image"]
-            y_size = int(sample["image"].shape[0] / self.scale)
-            x_size = int(sample["image"].shape[1] / self.scale)
+            
 
         if self.heatmaps_shape:
             keypoints_to_heatmap = rescale_keypoints(
-                sample["keypoints"], [y_size, x_size], self.heatmaps_shape
+                sample["keypoints"], (y_size, x_size), self.heatmaps_shape
             )
             y_size, x_size = self.heatmaps_shape
         else:
@@ -242,8 +246,8 @@ class HeatmapsDataset(PointsDataset, Dataset):
             sample["image"] /= torch.tensor(self.normalization["std"]).reshape(-1, 1, 1)
 
         # gt_image = (torch.cat((sample["heatmaps"], torch.zeros(1, 512, 512)), 0))
-        # save_image(sample["image"] / 255, f'./images_test/image_0.png')
-        # save_image(gt_image, f'./heatmaps_gt/gt_0.png')
+        # save_image(sample["image"] / 255, f'./images_test/image_{x}.png')
+        # save_image(gt_image, f'./heatmaps_gt/gt_{x}.png')
 
         return sample
 

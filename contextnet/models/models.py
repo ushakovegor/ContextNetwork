@@ -209,13 +209,13 @@ class ContextNet(nn.Module):
     def __init__(self, img_channels=3, num_classes=2, img_shape=None, kp_shape=None):
         super(ContextNet, self).__init__()
         self.backbone = seg_models.fcn_resnet50(pretrained=True)
-        self.backbone.classifier = ContextNetHead(2048, 1024, num_classes=num_classes)
+        self.backbone.classifier = ContextNetHead(2048, 512, num_classes=num_classes)
         self.backbone.aux_classifier = nn.Identity()
         # self.backbone.avgpool = Identity()
         # self.backbone.fc = Identity()
         # self.neck = CTResNetNeck(2048, num_deconv_filters=(512, 256, 128, 64), num_deconv_kernels=(3, 3, 3, 3))
         # self.head = ContextNetHead(64, 64, num_classes=num_classes)
-        # print(self.backbone)
+        print(self.backbone)
         if img_shape is not None:
             self.img_shape = img_shape
         else:
