@@ -161,7 +161,7 @@ class HeatmapsDataset(PointsDataset, Dataset):
         augs_list=[],
         scale=1,
         heatmaps_shape=None,
-        shift=(0, 0)
+        position_encoding=False
     ):
 
         super(HeatmapsDataset, self).__init__(
@@ -184,7 +184,11 @@ class HeatmapsDataset(PointsDataset, Dataset):
                 format="xy", label_fields=["class_labels"]
             )
         )
-        self.shift = shift
+
+        if position_encoding:
+            self.position_encoding = torch.zeros(1, heatmaps_shape[0], heatmaps_shape[1])
+        else:
+            self.position_encoding = None
 
     def __getitem__(self, x):
 
@@ -245,6 +249,8 @@ class HeatmapsDataset(PointsDataset, Dataset):
             )
             sample["image"] /= torch.tensor(self.normalization["std"]).reshape(-1, 1, 1)
 
+        if self.position_encoding:
+            sample['heatmaps'] = torch.cat(sample['heatmaps'], self.position_encoding)
         # gt_image = (torch.cat((sample["heatmaps"], torch.zeros(1, 512, 512)), 0))
         # save_image(sample["image"] / 255, f'./images_test/image_{x}.png')
         # save_image(gt_image, f'./heatmaps_gt/gt_{x}.png')

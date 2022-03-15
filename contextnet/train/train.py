@@ -30,7 +30,7 @@ class ModelTrainer:
                  scheduler=None,
                  similarity=None,
                  epochs=100,
-                 batch_size=2,
+                 batch_size=5,
                  device=None,
                  val_step=-1,
                  save_step=5,
@@ -62,14 +62,14 @@ class ModelTrainer:
             self.optimizer = optimizer
         else:
             params = [p for p in self.model.parameters() if p.requires_grad]
-            self.optimizer = torch.optim.SGD(params, lr=0.01)#, weight_decay=0.0001)
+            self.optimizer = torch.optim.SGD(params, lr=1.0)#, weight_decay=0.0001)
         # Loss
         if loss is not None:
             self.loss_func = loss
         else:
-            # self.loss_func = HeatmapHuber(class_weights=(1.0, 1.0))
+            self.loss_func = HeatmapHuber(class_weights=(1.0, 1.0))
             # self.loss_func = MixedLoss(class_weights=(1.0, 1.0), focal_weight=0.002)
-            self.loss_func = GaussianFocalLoss()
+            # self.loss_func = GaussianFocalLoss()
         
 
         # similarity
@@ -155,18 +155,20 @@ class ModelTrainer:
             gt_heatmaps = data['heatmap'].to(self.device)
 
             pd_heatmaps = self.model(images)
+            # pd_heatmaps = pd_heatmaps[:, :, 170:340, 170:340]
             # torch.onnx.export(self.model,               # model being run
             #       images,                         # model input (or a tuple for multiple inputs)
             #       "resnet_unet_modely.onnx")
-            pd_heatmaps =_sigmoid(pd_heatmaps)
-            pd_image = (torch.cat((pd_heatmaps[0], torch.zeros(1, 512, 512).to('cuda')), 0))
-            gt_image = (torch.cat((gt_heatmaps[0], torch.zeros(1, 512, 512).to('cuda')), 0))
+            # pd_heatmaps =_sigmoid(pd_heatmaps)
+            # pd_image = (torch.cat((pd_heatmaps[0], torch.zeros(1, 170, 170).to('cuda')), 0))
+            # gt_image = (torch.cat((gt_heatmaps[0], torch.zeros(1, 170, 170).to('cuda')), 0))
+            # pd_image = _sigmoid(pd_image)
             # pd_image[0] = (pd_image[0] - pd_image[0].min()) / (pd_image[0].max() - pd_image[0].min())
             # pd_image[1] = (pd_image[1] - pd_image[1].min()) / (pd_image[1].max() - pd_image[1].min())
-            save_image(images[0] / 255, f'./images_test/image_{n}.png')
-            save_image(pd_image[0], f'./heatmaps_pd/pd_{n}_stroma.png')
-            save_image(pd_image[1], f'./heatmaps_pd/pd_{n}_epith.png')
-            save_image(gt_image, f'./heatmaps_gt/gt_{n}.png')
+            # save_image(images[0] / 255, f'./images_test/image_{n}.png')
+            # save_image(pd_image[0], f'./heatmaps_pd/pd_{n}_stroma.png')
+            # save_image(pd_image[1], f'./heatmaps_pd/pd_{n}_epith.png')
+            # save_image(gt_image, f'./heatmaps_gt/gt_{n}.png')
             
             loss = self.loss_func(pd_heatmaps.cpu(), gt_heatmaps.cpu())
             loss_sum += loss.item()
@@ -202,16 +204,17 @@ class ModelTrainer:
                 gt_keypoints = data['keypoints']
                 gt_heatmaps = data['heatmap']
                 pd_heatmaps = self.model(images.to(self.device))
+                # pd_heatmaps = pd_heatmaps[:, :, 170:340, 170:340]
                 pd_heatmaps = pd_heatmaps.cpu()
-                pd_heatmaps =_sigmoid(pd_heatmaps)
-                # pd_image = (torch.cat((pd_heatmaps[0], torch.zeros(1, 256, 256)), 0))
-                # gt_image = (torch.cat((gt_heatmaps[0], torch.zeros(1, 256, 256)), 0))
-                # pd_image[0] = (pd_image[0] - pd_image[0].min()) / (pd_image[0].max() - pd_image[0].min())
-                # pd_image[1] = (pd_image[1] - pd_image[1].min()) / (pd_image[1].max() - pd_image[1].min())
-                # save_image(images[0] / 255, f'./images_test/image_{n}.png')
-                # save_image(pd_image[0], f'./heatmaps_pd/pd_{n}_stroma.png')
-                # save_image(pd_image[1], f'./heatmaps_pd/pd_{n}_epith.png')
-                # save_image(gt_image, f'./heatmaps_gt/gt_{n}.png')
+                # pd_heatmaps =_sigmoid(pd_heatmaps)
+                pd_image = (torch.cat((_sigmoid(pd_heatmaps[0]), torch.zeros(1, 512, 512)), 0))
+                gt_image = (torch.cat((gt_heatmaps[0], torch.zeros(1, 512, 512)), 0))
+                pd_image[0] = (pd_image[0] - pd_image[0].min()) / (pd_image[0].max() - pd_image[0].min())
+                pd_image[1] = (pd_image[1] - pd_image[1].min()) / (pd_image[1].max() - pd_image[1].min())
+                save_image(images[0] / 255, f'./images_test/image_{n}.png')
+                save_image(pd_image[0], f'./heatmaps_pd/pd_{n}_stroma.png')
+                save_image(pd_image[1], f'./heatmaps_pd/pd_{n}_epith.png')
+                save_image(gt_image, f'./heatmaps_gt/gt_{n}.png')
                 loss = self.loss_func(pd_heatmaps, gt_heatmaps)
                 loss_sum += loss.item()
                 n += 1
