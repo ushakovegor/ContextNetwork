@@ -2,9 +2,9 @@ from scipy.fftpack import shift
 import torch
 import os
 import shutil
-from contextnet.models.models import ContextNet, ContextNetTry2
-from contextnet.train.train import ModelTrainer
-from contextnet.utils.datasets import PrecomputedDataset, HeatmapsDataset
+from contextnet.models.models import ContextNet, ContextNetTry2, Segmentator
+from contextnet.train.train import ModelTrainer, SegTrainer
+from contextnet.utils.datasets import PrecomputedDataset, HeatmapsDataset, SegmentatedDataset
 from contextnet.utils.utils import parse_master_yaml
 from contextnet.utils.datasets import PrecomputionLight
 # from torch.utils.tensorboard import SummaryWriter
@@ -14,81 +14,72 @@ from torchvision.utils import save_image
 from nucleidet.train.meters import mAPmetric
 from contextnet.utils.utils import KPSimilarity
 from contextnet.utils.utils import _sigmoid
+import segmentation_models_pytorch as smp
+from segmentation_models_pytorch.utils.metrics import IoU
 
 
 def main():
-    # alb = [
-    #     A.RandomBrightnessContrast(p=0.2),
-    #     # A.RandomGridShuffle(p=0.2),
-    #     A.Flip(),
-    #     A.RandomRotate90()
-    #     ]
-    # train_data_yaml = "/home/ushakov/isp/dataset_bulk_splitted/train.yaml"
-    # train_lists = parse_master_yaml(train_data_yaml)
-
-    # train_dataset = HeatmapsDataset(
-    #     train_lists["images_lists"],
-    #     train_lists["labels_lists"],
-    #     num_classes=2,
-    #     resize_to=(512, 512),
-    #     scale=3,
-    #     heatmaps_shape=(512, 512),
-    #     sigma=7.62,
-    #     augs_list=alb
-    # )
-    # # for sample in train_dataset:
-    # #     print()
-    #     #break
-    # model = PrecomputionLight(train_dataset, '../../dataset_bulk_train_precomputed', k=10, overwrite=True)
-    # model.make()
-    # print()
-
-    train_dataset = PrecomputedDataset('../../dataset_bulk_train_precomputed/data.txt', epochs=10)
-    val_dataset = PrecomputedDataset('../../dataset_bulk_val_precomputed/data.txt')
-    # model = ContextNet()
-    # # model = torch.load('./checkpoints/contextnet_220.pth')
-    # # extractor = KeypointsExtractor(0.01, 9, (200, 200), 5)
-    # trainer = ModelTrainer(model, dataset_train=train_dataset, dataset_valid=val_dataset, kp_extractor=None, epochs=3000, val_step=5, verbose=False, classes=['Stroma', 'Epithelium'])
-    # trainer.train()
-    # # loss_sum, criterion_value = trainer.evaluate(dataloader=trainer.dataloader_val)
-    # # print(loss_sum, criterion_value)
-    # print()
+    train_data_yaml = "/home/ushakov/isp/dataset_bulk_splitted/train.yaml"
+    val_data_yaml = "/home/ushakov/isp/dataset_bulk_splitted/val.yaml"
+    train_lists = parse_master_yaml(train_data_yaml)
+    val_lists = parse_master_yaml(val_data_yaml)
+    augs = [A.CoarseDropout(p=0.5),
+        A.HorizontalFlip(p=0.5),
+        A.Flip(p=0.5),
+        A.ShiftScaleRotate(p=0.5),
+        A.GridDistortion(p=0.5)]
+    train_dataset = SegmentatedDataset(train_lists["images_lists"],
+                    train_lists["labels_lists"],
+                    n_classes=2,
+                    augs_list=augs,
+                    resize_to=(256,256))
+    val_dataset = SegmentatedDataset(val_lists["images_lists"],
+                    val_lists["labels_lists"],
+                    n_classes=2,
+                    resize_to=(256,256))
     
-    model = torch.load('./models/contextnet_40 (copy)_focal_loss.pth')
-    dataloader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=4, shuffle=False, num_workers=2, collate_fn=train_dataset.collate_fn)
-    extractor = KeypointsExtractor(0.11, 9, (512, 512), 7)
-    model.eval()
-    similarity = KPSimilarity(scale=7.62)
-    criterion = mAPmetric(similarity, (0, 1))
-    criterion.reset()
-    for data in dataloader:
-        images = data['image']
-        gt_keypoints = data['keypoints']
-        gt_heatmaps = data['heatmap']
-        pd_heatmaps = model(images.to('cuda:0'))
-        pd_heatmaps = _sigmoid(pd_heatmaps)
-        pd_image = (torch.cat((pd_heatmaps[0], torch.zeros(1, 512, 512).to('cuda')), 0))
-        gt_image = (torch.cat((gt_heatmaps[0], torch.zeros(1, 512, 512)), 0))
-        pd_image[0] = (pd_image[0] - pd_image[0].min()) / (pd_image[0].max() - pd_image[0].min())
-        pd_image[1] = (pd_image[1] - pd_image[1].min()) / (pd_image[1].max() - pd_image[1].min())
-        save_image(images[0] / 255, f'./images_test/image_test.png')
-        save_image(pd_image[0], f'./heatmaps_pd/pd_stroma.png')
-        save_image(pd_image[1], f'./heatmaps_pd/pd_epith.png')
-        save_image(gt_image, f'./heatmaps_gt/gt_test.png')
-        # print()
-        pd_keypoints, confidences = extractor(pd_heatmaps)
-        batch_gt = {"keypoints": gt_keypoints}
-        batch_pd = {"keypoints": pd_keypoints, "confidences": confidences}
-        criterion.update(batch_gt, batch_pd)
-        
-    criterion.compute()
-    criterion_value = criterion.get_value()
-    print(criterion_value)
-    print()
-        
-
-    
+    model = Segmentator()
+    # model = torch.load('./checkpoints/contextnet_50.pth')
+    loss = smp.losses.DiceLoss(smp.losses.BINARY_MODE)
+    criterion = IoU(activation='sigmoid')
+    params =[p for p in model.parameters() if p.requires_grad]
+    # optimizer = torch.optim.Adam(params, lr=0.0001, weight_decay=0.00001)
+    optimizer = torch.optim.Adadelta(params, lr=0.05)
+    trainer = SegTrainer(model,
+        dataset_train=train_dataset,
+        dataset_valid=val_dataset,
+        loss=loss,
+        criterion=criterion,
+        batch_size=8,
+        optimizer=optimizer,
+        epochs=500,
+        val_step=5,
+        verbose=False,
+        classes=['Stroma', 'Epithelium'])
+    trainer.train()
+    # model.eval()
+    # dataloader = torch.utils.data.DataLoader(
+    #     val_dataset, batch_size=4, shuffle=False, num_workers=2, collate_fn=val_dataset.collate_fn)
+    # for threshold in [0.3, 0.5, 0.6, 0.7, 0.8, 0.9]:
+    #     criterion = IoU(threshold=threshold, activation='sigmoid')
+    #     iou_sum = 0
+    #     n = 0
+    #     for data in dataloader:
+    #         images = data['image'].to('cuda')
+    #         gt_masks = data['mask'].to('cuda')
+    #         pd_masks = model(images)
+    #         # pd_masks = pd_masks.sigmoid()
+    #         # pd_mask_mod = ((pd_masks[0] - pd_masks[0].min()) / (pd_masks[0].max() - pd_masks[0].min()))
+    #         # pd_mask_max = (pd_mask_mod > 0.8) * 1.0
+    #         # save_image(images[0] / 255, f'./images_test/image_{n}.png')
+    #         # save_image(gt_masks[0], f'./masks_gt/mask_gt_{n}.png')
+    #         # save_image(pd_masks[0].sigmoid(), f'./masks_pd/mask_pd_{n}.png')
+            
+    #         iou_sum += criterion(pd_masks, gt_masks)
+    #         n += 1
+    #     iou_sum /= n
+    #     print(iou_sum, threshold)
+    # print()
     
 if __name__ == '__main__':
     main()

@@ -2,7 +2,6 @@ import warnings
 from bidict import bidict
 import numpy as np
 from endoanalysis.similarity import SimilarityMeasure
-
 def targets_mapping(
     similarity, sim_thresh, targets_gt, targets_pred, scores, multiclass=True
 ):

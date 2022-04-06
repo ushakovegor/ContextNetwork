@@ -1,3 +1,4 @@
+from matplotlib.pyplot import cla
 import numpy as np
 import torch
 import torch.nn as nn
@@ -208,7 +209,7 @@ class ContextNetHead(nn.Module):
 class ContextNet(nn.Module):
     def __init__(self, img_channels=3, num_classes=2, img_shape=None, kp_shape=None):
         super(ContextNet, self).__init__()
-        self.backbone = seg_models.fcn_resnet50(pretrained=False)
+        self.backbone = seg_models.fcn_resnet50(pretrained_backbone=False) # FIX RESNET INPUT SHAPE IN TORCHVISION
         self.backbone.classifier = ContextNetHead(2048, 512, num_classes=num_classes)
         self.backbone.aux_classifier = None
         # self.backbone.avgpool = Identity()
@@ -342,6 +343,21 @@ class ContextNetTry2(nn.Module):
         x = self.backbone(x)
         # x = self.head(x)
         return x
+
+
+class Segmentator(nn.Module):
+    def __init__(self, in_channels=3, n_classes=1, activation=None):
+        super().__init__()
+        self.model = smp.UnetPlusPlus(encoder_name="resnet101",
+                                        encoder_weights="imagenet",
+                                        in_channels=in_channels,
+                                        classes=n_classes,
+                                        activation=activation)
+
+    def forward(self, x):
+        x = self.model(x)
+        return x
+
 
 
 # class Unet(SegmentationModel):

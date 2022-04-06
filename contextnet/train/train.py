@@ -62,14 +62,14 @@ class ModelTrainer:
             self.optimizer = optimizer
         else:
             params = [p for p in self.model.parameters() if p.requires_grad]
-            self.optimizer = torch.optim.SGD(params, lr=1.0)#, weight_decay=0.0001)
+            self.optimizer = torch.optim.SGD(params, lr=0.01)#, weight_decay=0.0001)
         # Loss
         if loss is not None:
             self.loss_func = loss
         else:
-            self.loss_func = HeatmapHuber(class_weights=(1.0, 1.0))
+            # self.loss_func = HeatmapHuber(class_weights=(1.0, 1.0))
             # self.loss_func = MixedLoss(class_weights=(1.0, 1.0), focal_weight=0.002)
-            # self.loss_func = GaussianFocalLoss()
+            self.loss_func = GaussianFocalLoss()
         
 
         # similarity
@@ -142,7 +142,7 @@ class ModelTrainer:
                 if epoch % self.save_step == 0:
                     torch.save(self.model, f"{self.save_path}/contextnet_{epoch}.pth")
         if self.test_after_train:
-            self._evaluate('test')
+            self.__val_one_epoch('test')
     
     def _train_one_epoch(self, epoch):
         self.model.train()
@@ -153,22 +153,11 @@ class ModelTrainer:
             images = data['image'].to(self.device)
             gt_keypoints = data['keypoints']
             gt_heatmaps = data['heatmap'].to(self.device)
-
+            position_encod = torch.zeros(5, 1, 512, 512).to(self.device)
+            position_encod[:, :, 170:340, 170:340] = 1
+            images = torch.cat((images, position_encod), dim=1)
             pd_heatmaps = self.model(images)
-            # pd_heatmaps = pd_heatmaps[:, :, 170:340, 170:340]
-            # torch.onnx.export(self.model,               # model being run
-            #       images,                         # model input (or a tuple for multiple inputs)
-            #       "resnet_unet_modely.onnx")
-            # pd_heatmaps =_sigmoid(pd_heatmaps)
-            # pd_image = (torch.cat((pd_heatmaps[0], torch.zeros(1, 170, 170).to('cuda')), 0))
-            # gt_image = (torch.cat((gt_heatmaps[0], torch.zeros(1, 170, 170).to('cuda')), 0))
-            # pd_image = _sigmoid(pd_image)
-            # pd_image[0] = (pd_image[0] - pd_image[0].min()) / (pd_image[0].max() - pd_image[0].min())
-            # pd_image[1] = (pd_image[1] - pd_image[1].min()) / (pd_image[1].max() - pd_image[1].min())
-            # save_image(images[0] / 255, f'./images_test/image_{n}.png')
-            # save_image(pd_image[0], f'./heatmaps_pd/pd_{n}_stroma.png')
-            # save_image(pd_image[1], f'./heatmaps_pd/pd_{n}_epith.png')
-            # save_image(gt_image, f'./heatmaps_gt/gt_{n}.png')
+            pd_heatmaps =_sigmoid(pd_heatmaps)
             
             loss = self.loss_func(pd_heatmaps.cpu(), gt_heatmaps.cpu())
             loss_sum += loss.item()
@@ -187,13 +176,14 @@ class ModelTrainer:
         #self._logging_map(epoch + 1, loss_sum, [0.8131232, 0.6341341], [0.6451411, 0.431435135], [3456, 1633])
     
     def validate(self, epoch):
-        loss_sum = self.evaluate(self.dataloader_val)
+        loss_sum, metric_sum = self._val_one_epoch(self.dataloader_val)
         # if self.verbose:
         #     self.eval_log(epoch, loss_sum, criterion_value)
         self.writer.add_scalar('Loss/val', loss_sum, epoch)
+        self.writer.add_scalar('IoU/val', metric_sum, epoch)
         # self.writer.add_scalar('Evaluation/val', criterion_value, epoch)
 
-    def evaluate(self, dataloader):
+    def _val_one_epoch(self, dataloader):
         self.model.eval()
         #self.criterion.reset()
         loss_sum = 0
@@ -203,10 +193,13 @@ class ModelTrainer:
                 images = data['image']
                 gt_keypoints = data['keypoints']
                 gt_heatmaps = data['heatmap']
+                position_encod = torch.zeros(5, 1, 512, 512)
+                position_encod[:, :, 170:340, 170:340] = 1
+                images = torch.cat((images, position_encod), dim=1)
                 pd_heatmaps = self.model(images.to(self.device))
                 # pd_heatmaps = pd_heatmaps[:, :, 170:340, 170:340]
                 pd_heatmaps = pd_heatmaps.cpu()
-                # pd_heatmaps =_sigmoid(pd_heatmaps)
+                pd_heatmaps =_sigmoid(pd_heatmaps)
                 pd_image = (torch.cat((_sigmoid(pd_heatmaps[0]), torch.zeros(1, 512, 512)), 0))
                 gt_image = (torch.cat((gt_heatmaps[0], torch.zeros(1, 512, 512)), 0))
                 pd_image[0] = (pd_image[0] - pd_image[0].min()) / (pd_image[0].max() - pd_image[0].min())
@@ -226,7 +219,7 @@ class ModelTrainer:
         #self.criterion.compute()
         #criterion_value = self.criterion.get_value()
         
-        return loss_sum #, criterion_value
+        return loss_sum, 1
     
     def visualize(self, batch, ids=-1):
         # FIX ME
@@ -317,3 +310,89 @@ class ModelTrainer:
         print("+{0}+{1}+".format("".join(["-" for i in range(self.class_max_len + 2)]), "".join(["-" for i in range(self.inner_log_len)])))
 
 
+
+class SegTrainer(ModelTrainer):
+
+    def __init__(self, model,
+        dataset_train,
+        dataset_valid=None,
+        dataset_test=None,
+        optimizer=None,
+        loss=None,
+        criterion=None,
+        scheduler=None,
+        similarity=None,
+        epochs=100,
+        batch_size=5,
+        device=None,
+        val_step=-1,
+        save_step=5,
+        save_path='./checkpoints',
+        test_after_train=False,
+        verbose=True,
+        classes=None):
+
+        super().__init__(model,
+            dataset_train,
+            dataset_valid,
+            dataset_test,
+            optimizer,
+            loss,
+            criterion,
+            scheduler,
+            similarity,
+            epochs,
+            batch_size,
+            device,
+            val_step,
+            save_step,
+            save_path,
+            test_after_train,
+            verbose,
+            classes)
+        
+    def _train_one_epoch(self, epoch):
+        self.model.train()
+        loss_sum = 0
+        n = 0
+        for data in self.dataloader_train:
+            self.optimizer.zero_grad()
+            images = data['image'].to(self.device)
+            gt_masks = data['mask'].to(self.device)
+            pd_masks = self.model(images)
+            loss = self.loss_func(pd_masks, gt_masks)
+            loss_sum += loss.item()
+            n += 1
+            loss.backward()
+            self.optimizer.step()
+
+        if self.scheduler is not None:
+            self.scheduler.step()
+        loss_sum /= n
+        self.writer.add_scalar('Loss/train', loss_sum, epoch)
+        self.writer.add_scalar('lr', [group['lr'] for group in self.optimizer.param_groups][0], epoch)
+
+    def _val_one_epoch(self, dataloader):
+        self.model.eval()
+        loss_sum = 0
+        metric_sum = 0
+        n = 0
+        with torch.no_grad():
+            for data in dataloader:
+                images = data['image'].to(self.device)
+                gt_masks = data['mask'].to(self.device)
+                pd_masks = self.model(images)
+                # pd_mask_mod = ((pd_masks[0] - pd_masks[0].min()) / (pd_masks[0].max() - pd_masks[0].min()))
+                # pd_mask_max = (pd_mask_mod > 0.8) * 1.0
+                save_image(images[0] / 255, f'./images_test/image_{n}.png')
+                save_image(gt_masks[0], f'./masks_gt/mask_gt_{n}.png')
+                save_image(pd_masks[0].sigmoid(), f'./masks_pd/mask_pd_{n}.png')
+                
+                loss = self.loss_func(pd_masks, gt_masks)
+                loss_sum += loss.item()
+                metric_sum += self.criterion(pd_masks, gt_masks)
+                n += 1
+        loss_sum /= n
+        metric_sum /= n
+        
+        return loss_sum, metric_sum

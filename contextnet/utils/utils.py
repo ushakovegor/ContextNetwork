@@ -3,7 +3,9 @@ import numpy as np
 import cv2
 import os
 import yaml
-
+from skimage.morphology import convex_hull_image
+import numpy as np
+import json
 
 import numpy as np
 
@@ -417,3 +419,53 @@ def _sigmoid(x):
 #         for path in labels_pathes:
 #             images_file.write(f'{path}\n')
 #     print()
+
+
+def compute_distances_no_loops(Y, X):
+    """
+    Compute the distance between each test point in X and each training point
+    in self.X_train using no explicit loops.
+
+    Input / Output: Same as compute_distances_two_loops
+    """
+    dists = np.zeros((Y.shape[0], X.shape[0]))
+
+    dists -= 2 * X @ Y.T
+    dists += (np.sum(Y**2, axis=1))
+    dists = dists.T + np.sum(X**2, axis=1)
+    dists = dists.T
+    return np.sqrt(dists)
+
+def closest(x, dists):
+    return np.argsort(dists[x, :])[1:3]
+
+
+def generate_masks(image, keypoints):
+    whole_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    # whole_mask = np.zeros((170, 170),  dtype=np.uint8)
+    # keypoints = keypoints.astype(int)
+    if keypoints != []:
+        # keypoints = np.array(epithelial, dtype=np.int32)
+        dists = compute_distances_no_loops(keypoints, keypoints)
+        for i, point in enumerate(keypoints):
+            indices = closest(i, dists)
+            if len(indices) > 0:
+                j = indices[0]
+            else:
+                j = None
+            if len(indices) > 1:
+                k = indices[1]
+            else:
+                k = None
+            tmp_mask = np.zeros(whole_mask.shape, dtype=np.uint8)
+            tmp_mask = cv2.circle(tmp_mask, (keypoints[i][0], keypoints[i][1]), 16, 255, -1, lineType=cv2.LINE_AA)
+            if j and dists[i, j] < 26:
+                tmp_mask = cv2.circle(tmp_mask, (keypoints[j][0], keypoints[j][1]), 16, 255, -1, lineType=cv2.LINE_AA)
+            if k and dists[i, k] < 36:
+                tmp_mask = cv2.circle(tmp_mask, (keypoints[k][0], keypoints[k][1]), 16, 255, -1, lineType=cv2.LINE_AA)
+
+            tmp_mask = convex_hull_image(tmp_mask)
+            #helpers.image_show(255*tmp_mask)
+            whole_mask = np.maximum(whole_mask, tmp_mask)
+            #whole_mask = np.array(whole_mask, dtype=np.uint8)
+    return whole_mask.astype(np.float32)

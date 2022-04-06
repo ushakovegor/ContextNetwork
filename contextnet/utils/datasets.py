@@ -14,7 +14,8 @@ from nucleidet.data.keypoints import rescale_keypoints
 from contextnet.utils.utils import agregate_images_and_labels_paths, load_image, load_keypoints
 from endoanalysis.targets import KeypointsBatch
 from torchvision.utils import save_image
-
+from contextnet.utils.utils import generate_masks
+import time
 
 class PrecomputedDataset(Dataset):
     """
@@ -375,3 +376,55 @@ class PrecomputionLight:
             else:
                 raise Exception('Output directory is not empty and overwrite flag is disabled, aborting.')
         os.makedirs(dir)
+
+
+class SegmentatedDataset(PointsDataset, Dataset):
+    """
+    Dataset for segmentation.
+    """
+    def __init__(self,
+        images_list,
+        labels_list,
+        n_classes=1,
+        augs_list = [],
+        resize_to=None):
+
+        super().__init__(images_list, labels_list)
+        self.n_classes = n_classes
+        if resize_to:
+            augs_list.append(A.augmentations.Resize(*resize_to))
+
+        self.transform = A.Compose(augs_list)
+
+    def __getitem__(self, x):
+        image = load_image(self.images_paths[x])
+        keypoints = load_keypoints(self.labels_paths[x])
+        
+        keypoints_epith = [x[:2] for x in keypoints if x[2] == 1]
+        if keypoints_epith:
+            mask = generate_masks(image, np.array(keypoints_epith, dtype=int))
+        else:
+            mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        
+        if self.transform is not None:
+            transformed = self.transform(image=image, mask=mask)
+            image = transformed['image']
+            mask = transformed['mask']
+        image = np.transpose(image, (2, 0, 1))
+        to_return = {"mask": torch.tensor(mask, dtype=torch.float32).unsqueeze(dim=0),
+                    "image": torch.tensor(image, dtype=torch.float32)}
+
+        return to_return
+
+
+    def collate_fn(self, samples):
+
+        images = [x["image"] for x in samples]
+        seg_masks = [x["mask"] for x in samples]
+
+        return_dict = {
+           "image": torch.stack(images, 0).contiguous(),
+            "mask": torch.stack(seg_masks, 0).contiguous()
+        }
+
+        return return_dict
