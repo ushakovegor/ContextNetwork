@@ -24,6 +24,8 @@ def main():
     train_lists = parse_master_yaml(train_data_yaml)
     val_lists = parse_master_yaml(val_data_yaml)
     augs = [A.CoarseDropout(p=0.5),
+        A.RandomGridShuffle(p=0.1),
+        A.Transpose(p=0.5),
         A.HorizontalFlip(p=0.5),
         A.Flip(p=0.5),
         A.ShiftScaleRotate(p=0.5),
@@ -38,13 +40,16 @@ def main():
                     n_classes=2,
                     resize_to=(256,256))
     
-    model = Segmentator()
-    # model = torch.load('./checkpoints/contextnet_50.pth')
-    loss = smp.losses.DiceLoss(smp.losses.BINARY_MODE)
+    model = Segmentator(activation="sigmoid")
+    for param in model.model.encoder.parameters():
+        param.requires_grad = False
+        
+    # model = torch.load('./checkpoints/contextnet_475.pth')
+    loss = smp.losses.DiceLoss(mode='binary')
     criterion = IoU(activation='sigmoid')
     params =[p for p in model.parameters() if p.requires_grad]
-    # optimizer = torch.optim.Adam(params, lr=0.0001, weight_decay=0.00001)
-    optimizer = torch.optim.Adadelta(params, lr=0.05)
+    optimizer = torch.optim.Adam(params, lr=0.0001, weight_decay=0.0001)
+    # optimizer = torch.optim.Adadelta(params, lr=0.05)
     trainer = SegTrainer(model,
         dataset_train=train_dataset,
         dataset_valid=val_dataset,
@@ -52,7 +57,7 @@ def main():
         criterion=criterion,
         batch_size=8,
         optimizer=optimizer,
-        epochs=500,
+        epochs=1500,
         val_step=5,
         verbose=False,
         classes=['Stroma', 'Epithelium'])
@@ -60,7 +65,7 @@ def main():
     # model.eval()
     # dataloader = torch.utils.data.DataLoader(
     #     val_dataset, batch_size=4, shuffle=False, num_workers=2, collate_fn=val_dataset.collate_fn)
-    # for threshold in [0.3, 0.5, 0.6, 0.7, 0.8, 0.9]:
+    # for threshold in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
     #     criterion = IoU(threshold=threshold, activation='sigmoid')
     #     iou_sum = 0
     #     n = 0
@@ -79,7 +84,7 @@ def main():
     #         n += 1
     #     iou_sum /= n
     #     print(iou_sum, threshold)
-    # print()
+    print()
     
 if __name__ == '__main__':
     main()
